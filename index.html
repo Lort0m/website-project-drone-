@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="utf-8">
+    <title>Ma carte avec bâtiments en rouge</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    
+    <!-- Leaflet CSS - Bibliothèque de cartes interactives -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        /* Styles de base pour la page */
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        /* Conteneur de la carte */
+        #map {
+            height: 500px;
+            width: 100%;
+            border: 1px solid #ccc;
+            margin-top: 10px;
+        }
+        /* Zone des contrôles (bouton + statut) */
+        .controls {
+            margin: 10px 0;
+        }
+        /* Style du bouton Lancer */
+        button {
+            padding: 8px 16px;
+            font-size: 16px;
+        }
+        /* Texte de statut à côté du bouton */
+        #status {
+            margin-left: 10px;
+            color: #333;
+        }
+    </style>
+</head>
+<body>
+
+<h1>Place ton point sur la carte</h1>
+
+<!-- Zone des contrôles -->
+<div class="controls">
+    <button id="lancerBtn" disabled>Lancer</button>
+    <span id="status"></span>
+</div>
+
+<!-- Conteneur de la carte Leaflet -->
+<div id="map"></div>
+
+<!-- Zone d'affichage des résultats -->
+<p id="result"></p>
+
+<!-- Leaflet JS - Bibliothèque de cartes interactives -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+// Variables globales pour la gestion de la carte
+let map; // Instance de la carte Leaflet
+let userMarker = null; // Marqueur de position utilisateur (bleu)
+let customMarker = null; // Marqueur placé par l'utilisateur (rouge)
+let selectedLatLng = null; // Coordonnées du point sélectionné
+let buildingsLayer = null; // Couche des bâtiments (pour pouvoir la supprimer/réafficher)
+
+// Éléments DOM
+const statusEl = document.getElementById('status');
+const lancerBtn = document.getElementById('lancerBtn');
+const resultEl = document.getElementById('result');
+
+// Coordonnées par défaut (BSA)
+const DEFAULT_LAT = 44.37414973944449;
+const DEFAULT_LNG = 4.644867956060432;
+
+// Icône bleue pour la position utilisateur
+const blueIcon = L.icon({
+    iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png',
+    shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
+    iconSize: [25, 41],
+    iconAnchor: [12, 41],
+    shadowSize: [41, 41]
+});
+
+// Icône rouge pour le point sélectionné par l'utilisateur
+const redIcon = L.icon({
+    iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png',
+    shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
+    iconSize: [25, 41],
+    iconAnchor: [12, 41],
+    shadowSize: [41, 41]
+});
+
+// Fonction pour charger les bâtiments via l'API Overpass d'OpenStreetMap
+function loadBuildings() {
+    // Supprimer la couche existante si elle existe
+    if (buildingsLayer) {
+        map.removeLayer(buildingsLayer);
+    }
+
+    // Récupérer les limites de la vue actuelle de la carte
+    const bounds = map.getBounds();
+    const south = bounds.getSouth();
+    const west = bounds.getWest();
+    const north = bounds.getNorth();
+    const east = bounds.getEast();
+
+    // Requête Overpass pour récupérer tous les bâtiments dans la zone visible
+    const query = `
+        [out:json];
+        (
+          way["building"](${south},${west},${north},${east});
+          relation["building"](${south},${west},${north},${east});
+        );
+        out geom;
+    `;
+
+    // URL de l'API Overpass avec la requête encodée
+    // Pour changer d'API, remplace l'URL par une des alternatives :
+    // - 'https://overpass.kumi.systems/api/interpreter?data='
+    // - 'https://overpass.openstreetmap.ru/api/interpreter?data='
+    const overpassUrl = 'https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(query);
+
+    // Requête vers l'API Overpass
+    fetch(overpassUrl)
+        .then(response => response.json())
+        .then(data => {
+            const geojsonFeatures = [];
+
+            // Traiter chaque élément retourné par l'API
+            data.elements.forEach(elem => {
+                // Traitement des "ways" (chemins/polygones simples)
+                if (elem.type === "way" && elem.geometry && elem.geometry.length > 2) {
+                    const coords = elem.geometry.map(pt => [pt.lat, pt.lon]);
+                    // Fermer le polygone si nécessaire (premier point = dernier point)
+                    if (coords[0][0] !== coords[coords.length - 1][0] || coords[0][1] !== coords[coords.length - 1][1]) {
+                        coords.push(coords[0]);
+                    }
+                    geojsonFeatures.push({
+                        type: "Feature",
+                        properties: { id: elem.id, tags: elem.tags || {} },
+                        geometry: {
+                            type: "Polygon",
+                            coordinates: [coords]
+                        }
+                    });
+                }
+                // Traitement des "relations" (multipolygones complexes)
+                else if (elem.type === "relation" && elem.members) {
+                    const outerRings = [];
+                    elem.members.forEach(member => {
+                        if (member.role === "outer" && member.geometry && member.geometry.length > 2) {
+                            let ring = member.geometry.map(pt => [pt.lat, pt.lon]);
+                            if (ring[0][0] !== ring[ring.length - 1][0] || ring[0][1] !== ring[ring.length - 1][1]) {
+                                ring.push(ring[0]);
+                            }
+                            outerRings.push(ring);
+                        }
+                    });
+                    outerRings.forEach(ring => {
+                        geojsonFeatures.push({
+                            type: "Feature",
+                            properties: { id: elem.id, tags: elem.tags || {} },
+                            geometry: {
+                                type: "Polygon",
+                                coordinates: [ring]
+                            }
+                        });
+                    });
+                }
+            });
+
+            // Créer la couche GeoJSON avec les bâtiments
+            buildingsLayer = L.geoJSON(geojsonFeatures, {
+                // Style des bâtiments (rouge avec transparence)
+                style: function(feature) {
+                    return {
+                        color: 'red',
+                        weight: 1,
+                        fillColor: 'red',
+                        fillOpacity: 0.4
+                    };
+                },
+                // Popup pour chaque bâtiment
+                onEachFeature: function(feature, layer) {
+                    let popup = '<b>Bâtiment</b>';
+                    if (feature.properties.tags.building) {
+                        popup += `<br>Type : ${feature.properties.tags.building}`;
+                    }
+                    layer.bindPopup(popup);
+                }
+            }).addTo(map);
+        })
+        .catch(err => {
+            console.error("Erreur chargement bâtiments :", err);
+        });
+}
+
+// Fonction d'initialisation de la carte
+function initMap(lat, lng, zoom = 15) {
+    // Créer la carte centrée sur les coordonnées données
+    map = L.map('map').setView([lat, lng], zoom);
+
+    // Ajouter la couche de tuiles OpenStreetMap
+    // Pour changer de style de carte, remplace l'URL par :
+    // - 'https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png' (humanitarian)
+    // - 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}' (satellite)
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    }).addTo(map);
+
+    // Ajouter le marqueur de position utilisateur (bleu)
+    userMarker = L.marker([lat, lng], { icon: blueIcon })
+        .addTo(map)
+        .bindPopup('Vous êtes ici')
+        .openPopup();
+
+    // Gestionnaire de clic sur la carte
+    map.on('click', function(e) {
+        // Enregistrer les coordonnées du clic
+        selectedLatLng = e.latlng;
+        // Déplacer le marqueur existant ou en créer un nouveau
+        if (customMarker) {
+            customMarker.setLatLng(selectedLatLng);
+        } else {
+            customMarker = L.marker(selectedLatLng, { icon: redIcon })
+                .addTo(map)
+                .bindPopup('');
+        }
+        // Mettre à jour le popup avec les coordonnées et la distance
+        let distanceInfo = '';
+        if (userMarker) {
+            const userPos = userMarker.getLatLng();
+            const distance = userPos.distanceTo(selectedLatLng);
+            distanceInfo = `<br>Distance: ${(distance / 1000).toFixed(2)} km`;
+        }
+        const popupContent = `Point choisi<br>Lat: ${selectedLatLng.lat.toFixed(6)}<br>Lng: ${selectedLatLng.lng.toFixed(6)}${distanceInfo}`;
+        customMarker.setPopupContent(popupContent).openPopup();
+        // Activer le bouton Lancer
+        lancerBtn.disabled = false;
+        statusEl.textContent = "Point placé ! Tu peux cliquer sur Lancer";
+    });
+
+    // Charger les bâtiments après initialisation de la carte
+    setTimeout(loadBuildings, 500);
+
+    // Recharger les bâtiments quand l'utilisateur déplace/zoome la carte
+    map.on('moveend', () => {
+        if (map.getZoom() >= 14) { // Ne charger que si le zoom est suffisant
+            loadBuildings();
+        } else {
+            // Supprimer les bâtiments si zoom trop faible
+            if (buildingsLayer) {
+                map.removeLayer(buildingsLayer);
+                buildingsLayer = null;
+            }
+        }
+    });
+
+    statusEl.textContent = "Clique sur la carte pour placer ton point";
+}
+
+// Tentative de géolocalisation de l'utilisateur
+if (navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition(
+        // Succès : utiliser la position de l'utilisateur
+        position => {
+            const lat = position.coords.latitude;
+            const lng = position.coords.longitude;
+            initMap(lat, lng, 15);
+        },
+        // Erreur : utiliser la position par défaut
+        error => {
+            console.warn("Géolocalisation refusée ou indisponible", error);
+            statusEl.textContent = "Géolocalisation refusée, carte centrée sur BSA par défaut";
+            initMap(DEFAULT_LAT, DEFAULT_LNG, 15);
+        }
+    );
+} else {
+    // Navigateur ne supporte pas la géolocalisation
+    statusEl.textContent = "Géolocalisation non supportée par votre navigateur";
+    initMap(DEFAULT_LAT, DEFAULT_LNG, 15);
+}
+
+// Gestionnaire du bouton Lancer
+lancerBtn.addEventListener('click', () => {
+    // Vérifier qu'un point a été sélectionné
+    if (!selectedLatLng) {
+        alert("Tu n'as pas encore placé de point !");
+        return;
+    }
+
+    // Préparer les coordonnées à envoyer
+    const coordonnees = {
+        latitude: selectedLatLng.lat,
+        longitude: selectedLatLng.lng
+    };
+
+    // Afficher les coordonnées dans la console et sur la page
+    console.log("Coordonnées enregistrées :", coordonnees);
+    
+    // Calculer la distance avec Leaflet
+    let distanceText = '';
+    if (userMarker) {
+        const userPos = userMarker.getLatLng();
+        const distance = userPos.distanceTo(selectedLatLng);
+        distanceText = `<br>Distance: ${(distance / 1000).toFixed(2)} km`;
+    }
+    
+    resultEl.innerHTML = `<strong>Coordonnées enregistrées :</strong><br>
+        Latitude: ${coordonnees.latitude.toFixed(6)}<br>
+        Longitude: ${coordonnees.longitude.toFixed(6)}${distanceText}`;
+
+    // Envoyer les coordonnées au serveur backend
+    fetch('http://localhost:3000/api/save-point', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(coordonnees)
+    })
+    .then(resp => resp.json())
+    .then(data => {
+        if (data.success) {
+            statusEl.textContent = 'Coordonnées envoyées et sauvegardées.';
+        } else {
+            statusEl.textContent = 'Erreur serveur: ' + (data.error || 'inconnue');
+        }
+    })
+    .catch(err => {
+        console.error('Erreur envoi:', err);
+        statusEl.textContent = 'Impossible d\'atteindre le serveur.';
+    });
+
+    alert("Lancer ! Coordonnées sauvegardées.");
+});
+</script>
+
+</body>
+</html>
