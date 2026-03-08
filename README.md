@@ -24,3 +24,5 @@ npm start
 Le serveur écoute par défaut sur `http://localhost:3000`.
 
 Endpoint : `POST /api/save-point` attend JSON { latitude: Number, longitude: Number }
+
+modifier le README.md quand les modification sera fait 
