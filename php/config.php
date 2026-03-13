@@ -1,9 +1,9 @@
 <?php
 // definition des paramètres de connexion à la base de données avec des variablmes
 $servername = "localhost";
-$username = "root";
-$password = "";
-$dbname = "drone_tracking";3
+$username = "lort0m";
+$password = "2008";
+$dbname = "drone";3
 
 // connection base de donnée 
 $conn = new mysqli($servername, $username, $password, $dbname);
